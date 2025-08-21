@@ -165,6 +165,54 @@ def max_clear_radius_scores(centers, dots_data, np_to_use, batch_points=2000):
             scores[start:end] = m
         return scores
 
+def Boundary_Convex_Hull(grid_centers, dots_data ):
+    from scipy.spatial import ConvexHull
+    # -----------------------------------------------
+    # 2) Create a grid spanning the outer sphere box
+    #    (axis-aligned bounding box of union of spheres)
+    # -----------------------------------------------
+    # --- your grid points (already built) ---
+    grid_pts = grid_centers  # shape (M,3)
+    # --- pull centers/radii from your GRO-derived data ---
+    centers = dots_data[:, :3].astype(float)   # (N,3)
+    radii   = dots_data[:,  3].astype(float)   # (N,)
+    # --- convex-hull "wrap" using per-sphere axial extremes (±r along x,y,z) ---
+    ex = np.array([[ 1,0,0],[-1,0,0],[0, 1,0],[0,-1,0],[0,0, 1],[0,0,-1]], float)  # (6,3)
+    ext_points = (centers[:,None,:] + radii[:,None,None] * ex[None,:,:]).reshape(-1,3)
+
+    hull = ConvexHull(ext_points)
+    A = hull.equations[:, :3]   # normals
+    b = hull.equations[:,  3]   # offsets
+
+    # point-in-hull test: A @ x + b <= 0 for all faces
+    in_hull = np.all((A @ grid_pts.T).T + b <= 1e-12, axis=1)   # (M,)
+
+    # --- union-of-spheres test (chunked to save memory) ---
+    def mask_inside_any_sphere(points, centers, radii, chunk=4096):
+        """Boolean mask for points inside the union of spheres."""
+        M = points.shape[0]
+        mask = np.zeros(M, dtype=bool)
+        r2 = radii**2
+        for s in range(0, M, chunk):
+            P = points[s:s+chunk, None, :]                  # (m,1,3)
+            d2 = np.sum((P - centers[None,:,:])**2, axis=2) # (m,N)
+            mask[s:s+chunk] = np.any(d2 <= r2[None,:], axis=1)
+        return mask
+
+    inside_spheres = mask_inside_any_sphere(grid_pts, centers, radii)
+
+    # --- final void-space mask: inside hull AND outside all spheres ---
+    void_mask_flat = in_hull & (~inside_spheres)
+
+    # --- collect points for plotting/reporting ---
+    orig_centers   = grid_pts
+    purged_centers = grid_pts[void_mask_flat]
+
+    print(f"Grid points total: {orig_centers.shape[0]:,}")
+    print(f"Purged (void) points: {purged_centers.shape[0]:,}")
+
+    return purged_centers, orig_centers
+
 def VSD(data, number_grid_points = 10, box_dimensions_array = [6,6,6], step_size = 0.010, units = "nm",
         diameter=False, Gaussian_Fit = True, GPU =False, all_grid = True):
     
@@ -198,7 +246,10 @@ def VSD(data, number_grid_points = 10, box_dimensions_array = [6,6,6], step_size
     uniform_centers = parent_centers.shape[0]
 
     if all_grid:
-        grid_centers = parent_centers
+        ##############################
+        purged_centers, original_centers = Boundary_Convex_Hull(parent_centers,dots_data )
+        ##############################
+        grid_centers = purged_centers
         grid_cube_volume = cube_length_x * cube_length_y * cube_length_z
         total_calculations = grid_centers.shape[0] * len(data)
         print(f"Uniform centers (ngrid={number_grid_points}): {uniform_centers}")
